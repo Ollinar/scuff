@@ -1,0 +1,10 @@
+DROP TABLE t_seriesChapter;
+DROP TABLE t_series;
+DROP TABLE t_chapterPage;
+DROP TABLE t_chapterTag;
+DROP TABLE t_tag;
+DROP TABLE t_chapter;
+DROP TABLE t_page;
+DROP TABLE t_file;
+DROP TABLE t_archive;
+DROP TABLE t_pluginConfig;

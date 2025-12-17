@@ -1,0 +1,14 @@
+{
+  "app": {
+    "dbDSN": "./test/test.db?_fk=true",
+    "webappDir": "./webapp/build/",
+    "contentDir": "./test/content/",
+    "tempDir": "./test/temp/",
+    "thumbDir": "./test/thumb/",
+    "cacheDir": "./test/cache/",
+    "pluginDir": "./test/plugins/",
+    "chapterIndex": "./test/chapter.index",
+    "host": "0.0.0.0",
+    "port": 8080
+  }
+}
