@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/Ollinar/scuff/internal/model"
@@ -119,7 +118,7 @@ func (plugMod pluginModule) SetConfig(ctx context.Context, name, version string,
 	return nil
 }
 
-func (plugMod pluginModule) Run(ctx context.Context, plugInf plugin.PluginInfo, param map[string]string, targetIds ...model.ID) error {
+func (plugMod pluginModule) Exec(ctx context.Context, plugInf plugin.PluginInfo, param map[string]string, targetId model.ID) error {
 	plugFile, err := os.Open(filepath.Join(plugMod.app.pluginDir, plugMod.app.pluginProvider.FileName(plugInf)))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -133,12 +132,6 @@ func (plugMod pluginModule) Run(ctx context.Context, plugInf plugin.PluginInfo, 
 		return errors.Join(ErrUnexpected, err)
 	}
 
-	plug, err := plugMod.app.pluginProvider.Load(string(cont))
-	if err != nil {
-		return errors.Join(ErrUnexpected, err)
-	}
-	defer plug.Close()
-
 	conf, err := plugMod.app.pluginRepo.GetConfig(ctx, plugInf.Name, plugInf.Version)
 	if err != nil {
 		return errors.Join(ErrUnexpected, err)
@@ -147,139 +140,15 @@ func (plugMod pluginModule) Run(ctx context.Context, plugInf plugin.PluginInfo, 
 	plugMod.app.logger.Debug("executing plugin", slog.String("plugin name", plugInf.Name),
 		slog.Duration("delay", plugInf.Delay),
 	)
-	tkr := time.NewTicker(max(plugInf.Delay, 1))
-	defer tkr.Stop()
-	for _, id := range targetIds {
-		<-tkr.C
-		err = plug.Run(ctx, conf, param, id)
-		if err != nil {
-			return errors.Join(ErrUnexpected, err)
-		}
-
-	}
-
-	return nil
-}
-
-func (plugMod pluginModule) RunAutoRuns(ctx context.Context, targetType plugin.Target, targetIds ...model.ID) error {
-	plugs, err := plugMod.GetAll(ctx)
+	err = plugMod.app.pluginProvider.Execute(ctx, string(cont), conf, param, targetId)
 	if err != nil {
 		return err
 	}
-	plugs = slices.DeleteFunc(plugs, func(p plugin.PluginInfo) bool {
-		return !p.AutoRun || p.TargetEntity != targetType
-	})
-
-	for _, pi := range plugs {
-		err = plugMod.Run(ctx, pi, map[string]string{}, targetIds...)
-		if err != nil {
-			return err
-		}
-	}
 
 	return nil
 }
 
-type PluginQueue struct {
-	pluginInfos   []plugin.PluginInfo
-	plugins       []plugin.Plugin
-	delayTickers  []*time.Ticker
-	pluginConfigs map[int]map[string]string
-	iDChanel      chan model.ID
-	errorChan     chan error
-	wg            *sync.WaitGroup
-}
-
-func (q *PluginQueue) Add(id model.ID) {
-	q.iDChanel <- id
-}
-
-func (q *PluginQueue) ErrorChan() chan error {
-	return q.errorChan
-}
-
-func (q *PluginQueue) Close() error {
-	var err error
-	close(q.iDChanel)
-	// wait for all goworker to finish before closing the pool
-	q.wg.Wait()
-	for _, v := range q.plugins {
-		cErr := v.Close()
-		if cErr != nil {
-			err = errors.Join(err, cErr)
-		}
-	}
-	close(q.errorChan)
-	return err
-}
-
-func (q *PluginQueue) start(ctx context.Context, plugDir string, plugProv plugin.Provider, numOfWorker int) error {
-	// TODO: clean this up
-	pluginsSlice := make(map[int][]plugin.Plugin, numOfWorker)
-	q.delayTickers = make([]*time.Ticker, len(q.pluginInfos))
-	q.pluginConfigs = make(map[int]map[string]string, len(q.pluginInfos))
-	q.wg = &sync.WaitGroup{}
-	for plugIdx, plugInf := range q.pluginInfos {
-		plugFile, err := os.Open(filepath.Join(plugDir, plugProv.FileName(plugInf)))
-		if err != nil {
-			if os.IsNotExist(err) {
-				return errors.Join(ErrNotFound, fmt.Errorf("plugin %s not found", plugInf.Name))
-			}
-			return errors.Join(ErrUnexpected, err)
-		}
-		cont, err := io.ReadAll(plugFile)
-		if err != nil {
-			plugFile.Close()
-			return errors.Join(ErrUnexpected, err)
-		}
-		plugFile.Close()
-
-		for i := range numOfWorker {
-			plug, err := plugProv.Load(string(cont))
-			if err != nil {
-				q.Close()
-				return errors.Join(ErrUnexpected, err)
-			}
-			q.plugins = append(q.plugins, plug)
-			pluginsSlice[i] = append(pluginsSlice[i], plug)
-		}
-
-		conf := make(map[string]string, len(plugInf.Config))
-		for _, v := range plugInf.Config {
-			conf[v.Name] = v.Value
-		}
-		q.pluginConfigs[plugIdx] = conf
-		q.delayTickers[plugIdx] = time.NewTicker(plugInf.Delay)
-	}
-
-	for i := range numOfWorker {
-		go func() {
-			for {
-				select {
-				case id, ok := <-q.iDChanel:
-					if !ok {
-						return
-					}
-					q.wg.Add(1)
-					for i, plug := range pluginsSlice[i] {
-						<-q.delayTickers[i].C
-						err := plug.Run(ctx, q.pluginConfigs[i], map[string]string{}, id)
-						if err != nil {
-							q.errorChan <- errors.Join(ErrUnexpected, fmt.Errorf("failed to process id %d, error: %w", id, err))
-						}
-					}
-					q.wg.Done()
-
-				case <-ctx.Done():
-					return
-				}
-			}
-		}()
-	}
-	return nil
-}
-
-func (plugMod pluginModule) LoadAutoRuns(ctx context.Context, targetType plugin.Target, numOfworker int) (*PluginQueue, error) {
+func (plugMod pluginModule) LoadAutoRuns(ctx context.Context, targetType plugin.Target) ([]plugin.Plugin, error) {
 	plugs, err := plugMod.GetAll(ctx)
 	if err != nil {
 		return nil, err
@@ -288,15 +157,45 @@ func (plugMod pluginModule) LoadAutoRuns(ctx context.Context, targetType plugin.
 		return !p.AutoRun || p.TargetEntity != targetType
 	})
 
-	q := &PluginQueue{
-		pluginInfos: plugs,
-		iDChanel:    make(chan model.ID, numOfworker),
-		errorChan:   make(chan error),
-	}
-	err = q.start(ctx, plugMod.app.pluginDir, plugMod.app.pluginProvider, numOfworker)
-	if err != nil {
-		return nil, err
+	loadedPlugins := make([]plugin.Plugin, 0, len(plugs))
+	errored := false
+	defer func() {
+		if errored {
+			for _, plug := range loadedPlugins {
+				plug.Close()
+			}
+		}
+	}()
+
+	for _, plugInf := range plugs {
+		plugFile, err := os.Open(filepath.Join(plugMod.app.pluginDir, plugMod.app.pluginProvider.FileName(plugInf)))
+		if err != nil {
+			errored = true
+			if os.IsNotExist(err) {
+				return nil, errors.Join(ErrNotFound, fmt.Errorf("plugin %s not found", plugInf.Name))
+			}
+			return nil, errors.Join(ErrUnexpected, err)
+		}
+		cont, err := io.ReadAll(plugFile)
+		if err != nil {
+			errored = true
+			plugFile.Close()
+			return nil, errors.Join(ErrUnexpected, err)
+		}
+		plugFile.Close()
+		conf := make(map[string]string, len(plugInf.Config))
+		for _, c := range plugInf.Config {
+			conf[c.Name] = c.Value
+		}
+
+		plug, err := plugMod.app.pluginProvider.Load(ctx, string(cont), conf)
+		if err != nil {
+			errored = true
+			return nil, err
+		}
+		loadedPlugins = append(loadedPlugins, plug)
+
 	}
 
-	return q, nil
+	return loadedPlugins, nil
 }

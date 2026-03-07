@@ -76,7 +76,7 @@ func (apiV1 APIV1) RunPlugin(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusNotFound, "plugin not found")
 	}
 
-	err = apiV1.app.Plugin().Run(c.Request().Context(), *pi, req.Param, req.Target)
+	err = apiV1.app.Plugin().Exec(c.Request().Context(), *pi, req.Param, req.Target)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err)
 	}

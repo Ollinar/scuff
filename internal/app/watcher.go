@@ -94,10 +94,13 @@ mainloop:
 					continue
 				}
 				if isNew {
-					err = ap.Plugin().RunAutoRuns(ctx, plugin.TargetArchive, arc.ID)
+					plugins, err := ap.Plugin().LoadAutoRuns(ctx, plugin.TargetArchive)
 					if err != nil {
 						lg.Error("failed to run auto run plugin", slog.Int64("archive id", arc.ID), slog.Any("error", err))
 						continue
+					}
+					for _, plug := range plugins {
+						plug.QueueUp(arc.ID)
 					}
 				}
 

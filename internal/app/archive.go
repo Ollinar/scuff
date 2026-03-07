@@ -347,43 +347,11 @@ func (am archiveModule) ScanContentDirectory(ctx context.Context) error {
 	cancelCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	newArcIDChan := make(chan model.ID, 1)
-	pluginQueue, err := am.app.Plugin().LoadAutoRuns(ctx, plugin.TargetArchive, 10)
+	plugins, err := am.app.Plugin().LoadAutoRuns(ctx, plugin.TargetArchive)
 	if err != nil {
 		return err
 	}
-	go func() {
-		for err := range pluginQueue.ErrorChan() {
-			if err != nil {
-				am.app.logger.Error("error from plugin", slog.Any("error", err))
-			}
-		}
-	}()
 
-	go func() {
-		defer pluginQueue.Close()
-		pendingIds := make([]model.ID, 0, len(zipPaths))
-	mainloop:
-		for {
-			select {
-			case id, ok := <-newArcIDChan:
-				if !ok {
-					break mainloop
-				}
-				pendingIds = append(pendingIds, id)
-			default:
-				if len(pendingIds) > 0 {
-					pluginQueue.Add(pendingIds[0])
-					pendingIds = pendingIds[1:]
-				}
-
-			}
-		}
-		for len(pendingIds) > 0 {
-			pluginQueue.Add(pendingIds[0])
-			pendingIds = pendingIds[1:]
-		}
-	}()
 	for _, zp := range zipPaths {
 		limiterCh <- struct{}{}
 		wg.Add(1)
@@ -405,7 +373,9 @@ func (am archiveModule) ScanContentDirectory(ctx context.Context) error {
 				cancel()
 			}
 			if isNew {
-				newArcIDChan <- arc.ID
+				for _, plug := range plugins {
+					plug.QueueUp(arc.ID)
+				}
 			}
 		}(zp)
 	}
@@ -413,7 +383,6 @@ func (am archiveModule) ScanContentDirectory(ctx context.Context) error {
 	go func() {
 		wg.Wait()
 		close(errCh)
-		close(newArcIDChan)
 	}()
 	for err := range errCh {
 		if err != nil {

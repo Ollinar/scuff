@@ -2,10 +2,9 @@ package luaplugin
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
-	"sync"
 
 	"github.com/Ollinar/scuff/internal/model"
 	"github.com/Ollinar/scuff/internal/plugin"
@@ -25,12 +24,14 @@ type LuaModule func(L *lua.LState)
 
 type LuaPlugin struct {
 	httpClient *http.Client
+	logger     *slog.Logger
 	modules    []LuaModule
 }
 
-func NewLuaPlugin(opts ...LuaModule) *LuaPlugin {
+func NewLuaPlugin(logger *slog.Logger, opts ...LuaModule) *LuaPlugin {
 	lp := LuaPlugin{
 		modules: opts,
+		logger:  logger,
 	}
 
 	return &lp
@@ -66,7 +67,38 @@ func (luaPlug LuaPlugin) Validate(script string) (plugin.PluginInfo, error) {
 	return modInf.PluginInfo, nil
 }
 
-func (luaPlug LuaPlugin) Load(script string) (plugin.Plugin, error) {
+// Execute implements [plugin.Provider].
+func (luaPlug *LuaPlugin) Execute(ctx context.Context, script string, config map[string]string, param map[string]string, id model.ID) error {
+
+	L := luaPlug.newVM()
+	err := L.DoString(script)
+	if err != nil {
+		return err
+	}
+	modV := L.Get(-1)
+	L.Pop(1)
+	mod, err := pluginParseModule(modV)
+	if err != nil {
+		return err
+	}
+	L.SetContext(ctx)
+	plugConf, plugParam := toPluginArgs(L, mod.PluginInfo, config, nil)
+	err = L.CallByParam(lua.P{
+		Fn:      mod.runFunc,
+		NRet:    1,
+		Protect: true,
+	}, lua.LNumber(id), plugConf, plugParam)
+	if err != nil {
+		return err
+	}
+	lErr := L.Get(-1)
+	if lErr.Type() != lua.LTNil {
+		return err
+	}
+	return nil
+}
+
+func (luaPlug LuaPlugin) Load(ctx context.Context, script string, config map[string]string) (plugin.Plugin, error) {
 	L := luaPlug.newVM()
 	err := L.DoString(script)
 	if err != nil {
@@ -78,12 +110,7 @@ func (luaPlug LuaPlugin) Load(script string) (plugin.Plugin, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	pI := plugImpl{
-		mu:     &sync.Mutex{},
-		L:      L,
-		module: mod,
-	}
+	pI := newPluginImpl(ctx, L, mod, config, nil)
 
 	return pI, nil
 }
@@ -106,38 +133,88 @@ func (luaPlug LuaPlugin) newVM() *lua.LState {
 }
 
 type plugImpl struct {
-	mu     *sync.Mutex
-	L      *lua.LState
-	module moduleInfo
+	L *lua.LState
+
+	addIdChan chan model.ID
+}
+
+func newPluginImpl(ctx context.Context, L *lua.LState, mod moduleInfo, config map[string]string, logger *slog.Logger) plugImpl {
+	pi := plugImpl{
+		L:         L,
+		addIdChan: make(chan model.ID),
+	}
+
+	workerChan := make(chan model.ID)
+
+	go func() {
+		var ids []model.ID
+		// nextID is needed because the (case conditionalChan <- nextID:) will out of bounds
+		var nextID model.ID
+		var inputChan <-chan model.ID = pi.addIdChan
+		for {
+			// chan will stay nil if ids is empty so it will lock the case clause
+			var conditionalChan chan<- model.ID
+
+			if len(ids) > 0 {
+				conditionalChan = workerChan
+				nextID = ids[0]
+			} else if inputChan == nil && len(ids) == 0 {
+				close(workerChan)
+				return
+			}
+
+			select {
+			case <-ctx.Done():
+				close(workerChan)
+				return
+			case id, ok := <-inputChan:
+				if !ok {
+					inputChan = nil
+					continue
+				}
+				ids = append(ids, id)
+			case conditionalChan <- nextID:
+				ids = ids[1:]
+				if len(ids) == 0 {
+					ids = nil
+				}
+
+			}
+		}
+
+	}()
+
+	go func() {
+		for id := range workerChan {
+			L := pi.L
+			L.SetContext(ctx)
+			plugConf, plugParam := toPluginArgs(L, mod.PluginInfo, config, nil)
+			err := L.CallByParam(lua.P{
+				Fn:      mod.runFunc,
+				NRet:    1,
+				Protect: true,
+			}, lua.LNumber(id), plugConf, plugParam)
+			if err != nil {
+				logger.Error("failed to execute plugin", slog.Any("error", err))
+				continue
+			}
+			lErr := L.Get(-1)
+			if lErr.Type() != lua.LTNil {
+				logger.Error("plugin returned an error", slog.Any("error", err))
+				continue
+			}
+		}
+	}()
+
+	return pi
+}
+
+// QueueUp implements [plugin.Plugin].
+func (plugI plugImpl) QueueUp(id model.ID) {
+	plugI.addIdChan <- id
 }
 
 func (plugI plugImpl) Close() error {
-	plugI.mu.Lock()
-	defer plugI.mu.Unlock()
 	plugI.L.Close()
-	return nil
-}
-
-func (plugI plugImpl) Run(ctx context.Context, config, param map[string]string, id model.ID) error {
-	plugI.mu.Lock()
-	defer plugI.mu.Unlock()
-	L := plugI.L
-	L.SetContext(ctx)
-	defer L.RemoveContext()
-
-	plugConf, plugParam := toPluginArgs(L, plugI.module.PluginInfo, config, param)
-	err := L.CallByParam(lua.P{
-		Fn:      plugI.module.runFunc,
-		NRet:    1,
-		Protect: true,
-	}, lua.LNumber(id), plugConf, plugParam)
-	if err != nil {
-		return err
-	}
-	lErr := L.Get(-1)
-	if lErr.Type() != lua.LTNil {
-		return errors.New(lErr.String())
-	}
-
 	return nil
 }

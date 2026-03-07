@@ -18,13 +18,14 @@ const (
 
 type Provider interface {
 	Validate(string) (PluginInfo, error)
-	Load(string) (Plugin, error)
 	FileName(PluginInfo) string
+	Execute(ctx context.Context, script string, config, param map[string]string, id model.ID) error
+	Load(ctx context.Context, script string, config map[string]string) (Plugin, error)
 }
 
 type Plugin interface {
 	Close() error
-	Run(ctx context.Context, config, param map[string]string, id model.ID) error
+	QueueUp(id model.ID)
 }
 
 type PluginInfo struct {

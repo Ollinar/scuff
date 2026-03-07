@@ -49,15 +49,16 @@ func main() {
 		}()
 	}
 
-	pluginProv := luaplugin.NewLuaPlugin()
 	logggerOpts := slog.HandlerOptions{
 		Level: slog.LevelWarn,
 	}
+	appLogger := slog.New(slog.NewTextHandler(os.Stdout, &logggerOpts))
+
+	pluginProv := luaplugin.NewLuaPlugin(appLogger.WithGroup("PLUGIN"))
 	if conf.Debug {
 		logggerOpts.Level = slog.LevelDebug
 		logggerOpts.AddSource = true
 	}
-	appLogger := slog.New(slog.NewTextHandler(os.Stdout, &logggerOpts))
 
 	ap, err := app.NewApp(appCtx,
 		conf.DBDNS, pluginProv,
