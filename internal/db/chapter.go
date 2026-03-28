@@ -5,12 +5,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"regexp"
 	"slices"
-	"strings"
 
 	"github.com/Ollinar/scuff/internal/model"
-	"github.com/Ollinar/scuff/internal/search"
 
 	"github.com/jmoiron/sqlx"
 )
@@ -98,9 +95,9 @@ func (ch Chapter) Update(ctx context.Context, chapterID model.ID, chap model.Cha
 	return chap, nil
 }
 
-func (ch Chapter) Search(ctx context.Context, pagination search.Pagination, filter *search.ChapterFilter) ([]model.Chapter, int, error) {
-	return ch.search(ctx, ch.db, pagination, filter)
-}
+// func (ch Chapter) Search(ctx context.Context, pagination search.Pagination, filter *search.ChapterFilter) ([]model.Chapter, int, error) {
+// 	return ch.search(ctx, ch.db, pagination, filter)
+// }
 
 func (ch Chapter) addChapters(ctx context.Context, tx *sqlx.Tx, chaps []model.Chapter) ([]model.Chapter, error) {
 	if len(chaps) == 0 {
@@ -311,212 +308,6 @@ func (ch Chapter) getChaptersByIds(ctx context.Context, db dbtx, ids []int64) ([
 	}
 
 	return chapterRows(chaps).toModel(), nil
-}
-
-func (ch Chapter) search(ctx context.Context, db dbtx, pagination search.Pagination, filter *search.ChapterFilter) ([]model.Chapter, int, error) {
-	args := []any{}
-	mainSB := strings.Builder{}
-	mainSB.WriteString(`SELECT c.c_id,c.c_name,c.c_description,c.c_coverPageId,
-	COALESCE(GROUP_CONCAT(DISTINCT cp.c_pageId ORDER BY cp.c_pageNumber),"") AS pageIds,
-	COUNT(c.c_id) OVER() as count
-	FROM t_chapter c
-	LEFT JOIN t_chapterPage cp ON c.c_id=cp.c_chapterId
-	LEFT JOIN t_chapterTag ct ON c.c_id=ct.c_chapterId
-	LEFT JOIN t_tag t ON ct.c_tagId=t.c_id 
-	`)
-	firstWhere := true
-	firstHaving := true
-	if filter == nil {
-		mainSB.WriteString("GROUP BY c.c_id ")
-		goto sorting
-	}
-
-	for _, v := range filter.HaveNames {
-		if firstWhere {
-			mainSB.WriteString("WHERE c.c_name REGEXP ? ")
-			firstWhere = false
-		} else {
-			mainSB.WriteString("AND c.c_name REGEXP ? ")
-		}
-		args = append(args, buildRegexpStringFilter(v))
-	}
-	for _, v := range filter.NotHaveNames {
-		if firstWhere {
-			mainSB.WriteString("WHERE c.c_name NOT REGEXP ? ")
-			firstWhere = false
-		} else {
-			mainSB.WriteString("AND c.c_name NOT REGEXP ? ")
-		}
-		args = append(args, buildRegexpStringFilter(v))
-	}
-
-	if len(filter.ContainNames) > 0 {
-		nms := make([]string, 0, len(filter.ContainNames))
-		for _, v := range filter.ContainNames {
-			nms = append(nms, buildRegexpStringFilter(v))
-		}
-		if firstWhere {
-			mainSB.WriteString("WHERE c.c_name REGEXP ? ")
-			firstWhere = false
-		} else {
-			mainSB.WriteString("AND c.c_name REGEXP ? ")
-		}
-		args = append(args, strings.Join(nms, "|"))
-
-	}
-
-	mainSB.WriteString("GROUP BY c.c_id ")
-	if len(filter.HaveTags) > 0 {
-		namespaceMap := make(map[search.StringFilter][]search.StringFilter, len(filter.HaveTags))
-		for _, v := range filter.HaveTags {
-			namespaceMap[v.Namespace] = append(namespaceMap[v.Namespace], v.Label)
-		}
-		for nmsp, lbl := range namespaceMap {
-			if firstHaving {
-				mainSB.WriteString("HAVING ")
-				firstHaving = false
-			} else {
-				mainSB.WriteString("AND ")
-			}
-
-			mainSB.WriteString(`COUNT(DISTINCT t.c_label) FILTER(WHERE t.c_namespace NOT NULL AND t.c_label NOT NULL AND t.c_namespace REGEXP 
-			? AND t.c_label REGEXP ?)>=? `)
-			lblStrs := make([]string, 0, len(lbl))
-			for _, v := range lbl {
-				lblStrs = append(lblStrs, buildRegexpStringFilter(v))
-			}
-			args = append(args,
-				buildRegexpStringFilter(nmsp),
-				strings.Join(lblStrs, "|"),
-				len(lblStrs),
-			)
-		}
-	}
-
-	if len(filter.NotHaveTags) > 0 {
-		namespaceMap := make(
-			map[search.StringFilter][]search.StringFilter,
-			len(filter.NotHaveTags))
-		for _, v := range filter.NotHaveTags {
-			namespaceMap[v.Namespace] = append(namespaceMap[v.Namespace], v.Label)
-		}
-		for nmsp, lbl := range namespaceMap {
-			if firstHaving {
-				mainSB.WriteString("HAVING ")
-				firstHaving = false
-			} else {
-				mainSB.WriteString("AND ")
-			}
-
-			mainSB.WriteString(`COUNT(DISTINCT t.c_label) FILTER(WHERE t.c_namespace NOT NULL 
-				AND t.c_label NOT NULL AND t.c_namespace REGEXP ? AND t.c_label REGEXP ?)=0 `)
-			lblStrs := make([]string, 0, len(lbl))
-			for _, v := range lbl {
-				lblStrs = append(lblStrs, buildRegexpStringFilter(v))
-			}
-			args = append(args,
-				buildRegexpStringFilter(nmsp),
-				strings.Join(lblStrs, "|"),
-			)
-		}
-	}
-
-	if len(filter.ContainTags) > 0 {
-		namespaceMap := make(
-			map[search.StringFilter][]search.StringFilter,
-			len(filter.ContainTags))
-		for _, v := range filter.ContainTags {
-			namespaceMap[v.Namespace] = append(namespaceMap[v.Namespace], v.Label)
-		}
-		for nmsp, lbl := range namespaceMap {
-			if firstHaving {
-				mainSB.WriteString("HAVING ")
-				firstHaving = false
-			} else {
-				mainSB.WriteString("AND ")
-			}
-
-			mainSB.WriteString(`COUNT(DISTINCT t.c_label) FILTER(WHERE t.c_namespace NOT NULL AND t.c_label NOT NULL AND
-				t.c_namespace REGEXP ? AND t.c_label REGEXP ?)>=1 `)
-			lblStrs := make([]string, 0, len(lbl))
-			for _, v := range lbl {
-				lblStrs = append(lblStrs, buildRegexpStringFilter(v))
-			}
-			args = append(args,
-				buildRegexpStringFilter(nmsp),
-				strings.Join(lblStrs, "|"),
-			)
-		}
-	}
-
-sorting:
-	if len(pagination.Sorting) > 0 {
-		mainSB.WriteString("ORDER BY ")
-		for i, v := range pagination.Sorting {
-			if i != 0 {
-				mainSB.WriteString(",")
-			}
-			switch sort := v.(type) {
-			case search.IDSort:
-				mainSB.WriteString("c.c_id ")
-			case search.NameSort:
-				mainSB.WriteString("c.c_name ")
-			case search.TagNamespaceSort:
-				mainSB.WriteString("GROUP_CONCAT(CONCAT(t.c_namespace,t.c_label) ORDER BY CASE WHEN t.c_namespace ")
-				if sort.Namespace.Type == search.MatchingExact {
-					mainSB.WriteString("= ? ")
-					args = append(args, sort.Namespace.Value)
-				} else {
-					sortV := regexp.QuoteMeta(sort.Namespace.Value)
-					switch sort.Namespace.Type {
-					case search.MatchingPrefix:
-						sortV = "^" + sortV
-					case search.MatchingSuffix:
-						sortV += "$"
-					default:
-					}
-					mainSB.WriteString("REGEXP ? ")
-					args = append(args, sortV)
-
-				}
-				mainSB.WriteString("THEN 0 ELSE 1 END,t.c_namespace,t.c_label) FILTER(WHERE t.c_namespace NOT NULL AND t.c_label NOT NULL) ")
-
-			}
-			if v.Direction() == search.Descending {
-				mainSB.WriteString("DESC ")
-			}
-			mainSB.WriteString("NULLS LAST ")
-		}
-	}
-
-	if pagination.PageSize != nil {
-		mainSB.WriteString("LIMIT ? ")
-		args = append(args, *pagination.PageSize)
-		if pagination.Page != nil {
-			mainSB.WriteString("OFFSET ? ")
-			args = append(args, max(0, (*pagination.Page-1)*(*pagination.PageSize)))
-		}
-	}
-
-	var chaps []chapterRow
-	err := db.SelectContext(ctx, &chaps, mainSB.String(), args...)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	for i, v := range chaps {
-		tgs, err := ch.getChapterTags(ctx, db, v.CID)
-		if err != nil {
-			return nil, 0, err
-		}
-		chaps[i].tags = tgs
-
-	}
-	count := 0
-	if len(chaps) >= 1 {
-		count = int(chaps[0].Count)
-	}
-	return chapterRows(chaps).toModel(), count, nil
 }
 
 func (ch Chapter) upsertChapterPage(ctx context.Context, tx *sqlx.Tx, chapterID, pageID model.ID, pageNumber int) error {

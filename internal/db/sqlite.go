@@ -5,7 +5,6 @@ import (
 	"embed"
 	"errors"
 	"net/url"
-	"regexp"
 	"strings"
 
 	"github.com/Ollinar/scuff/internal/repository"
@@ -14,7 +13,6 @@ import (
 	migrate_sqlite3 "github.com/golang-migrate/migrate/v4/database/sqlite3"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/jmoiron/sqlx"
-	"github.com/mattn/go-sqlite3"
 )
 
 //go:embed schema/*.sql
@@ -30,15 +28,8 @@ type Sqlite struct {
 }
 
 func NewSqlite(dsn string) (*Sqlite, error) {
-	sql.Register("sqlite3_withregex", &sqlite3.SQLiteDriver{
-		ConnectHook: func(sc *sqlite3.SQLiteConn) error {
-			sc.RegisterFunc("regexp", func(pat string, s string) (bool, error) {
-				return regexp.MatchString(pat, s)
-			}, true)
-			return nil
-		},
-	})
-	mDB, err := sqlx.Open("sqlite3_withregex", addOptionsToDSN(dsn))
+
+	mDB, err := sqlx.Open("sqlite3", addOptionsToDSN(dsn))
 	if err != nil {
 		return nil, err
 	}
